@@ -15,7 +15,9 @@ import (
 	"time"
 )
 
-// copyBufPool reuses 32 KB buffers for io.CopyBuffer, avoiding per-request allocation.
+// copyBufPool reuses 32 KB buffers for io.CopyBuffer.
+// 32 KB balances syscall count vs memory: 1 MB = 32 syscalls, not 256.
+// nginx proxy_buffering off only disables disk buffering, not socket buffers.
 var copyBufPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 32*1024)
@@ -61,8 +63,11 @@ func NewProxyHandler() *ProxyHandler {
 		// decompressing upstream gzip in memory then sending uncompressed.
 		DisableCompression: true,
 		ForceAttemptHTTP2:  true,
-		WriteBufferSize:    64 * 1024,
-		ReadBufferSize:     64 * 1024,
+		// Restore sensible buffer sizes. nginx proxy_buffering off only skips
+		// disk buffering; kernel socket buffers remain large.
+		// 32 KB keeps syscall count low without excess pre-read.
+		WriteBufferSize: 32 * 1024,
+		ReadBufferSize:  32 * 1024,
 	}
 
 	return &ProxyHandler{
@@ -130,6 +135,15 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outReq.Header[k] = vs
 	}
 
+	// Passthrough Range / If-Range for video seek & resume.
+	// Without this, a seek request pulls the entire file from upstream.
+	if rng := r.Header.Get("Range"); rng != "" {
+		outReq.Header.Set("Range", rng)
+	}
+	if ifr := r.Header.Get("If-Range"); ifr != "" {
+		outReq.Header.Set("If-Range", ifr)
+	}
+
 	// Masquerade Host + TLS SNI
 	hostVal := t.Domain
 	if !isDefaultPort(t.Scheme, t.Port) {
@@ -178,7 +192,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ct := resp.Header.Get("Content-Type")
 	if shouldRewriteBody(ct) {
-		h.serveRewrittenBody(w, r, resp, baseURL, t)
+		h.serveRewrittenBody(w, r, resp, baseURL)
 		log.Printf("[API] %d %s %s/%s (%s)", resp.StatusCode, r.Method, t.Domain, t.Path, time.Since(start))
 	} else {
 		written := h.serveStreamBody(w, resp)
@@ -195,14 +209,14 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *ProxyHandler) serveRewrittenBody(w http.ResponseWriter, r *http.Request, resp *http.Response, baseURL string, t *target) {
+func (h *ProxyHandler) serveRewrittenBody(w http.ResponseWriter, r *http.Request, resp *http.Response, baseURL string) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[ERROR] read body failed: %v", err)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	rewritten := rewriteBody(body, baseURL, t)
+	rewritten := rewriteBody(body, baseURL)
 
 	// Compress rewritten text responses if client supports gzip.
 	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
