@@ -18,6 +18,10 @@ type target struct {
 	Query  string
 }
 
+type resolvedTarget struct {
+	dialAddrs []string
+}
+
 func parseTarget(path, query string) (*target, error) {
 	trimmed := strings.TrimPrefix(path, "/")
 	if trimmed == "" {
@@ -132,28 +136,61 @@ func normalizeTargetHost(host string) string {
 	return strings.TrimSuffix(host, ".")
 }
 
-func validateTargetSafety(ctx context.Context, resolver *net.Resolver, t *target) error {
-	return validateHostSafety(ctx, resolver, t.Domain)
+func (rt *resolvedTarget) dialAddresses() []string {
+	return rt.dialAddrs
 }
 
-func validateHostSafety(ctx context.Context, resolver *net.Resolver, host string) error {
+func resolveSafeTarget(ctx context.Context, resolver *net.Resolver, t *target) (*resolvedTarget, error) {
+	ips, err := resolveSafeHostIPs(ctx, resolver, t.Domain)
+	if err != nil {
+		return nil, err
+	}
+	return &resolvedTarget{dialAddrs: buildDialAddresses(ips, t.Port)}, nil
+}
+
+func buildDialAddresses(ips []net.IP, port int) []string {
+	addrs := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		addrs = append(addrs, net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+	}
+	return addrs
+}
+
+func resolveSafeHostIPs(ctx context.Context, resolver *net.Resolver, host string) ([]net.IP, error) {
 	normalized := normalizeTargetHost(host)
 	if normalized == "" {
-		return fmt.Errorf("domain is required")
+		return nil, fmt.Errorf("domain is required")
 	}
 	if normalized == "localhost" || normalized == "host.docker.internal" {
-		return fmt.Errorf("blocked target host: %s", host)
+		return nil, fmt.Errorf("blocked target host: %s", host)
 	}
 	ips, err := resolveTargetIPs(ctx, resolver, normalized)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	unsafeIPs := false
+	safeIPs := make([]net.IP, 0, len(ips))
 	for _, ip := range ips {
 		if isDangerousIP(ip) {
-			return fmt.Errorf("blocked target host: %s", host)
+			unsafeIPs = true
+			continue
 		}
+		safeIPs = append(safeIPs, ip)
 	}
-	return nil
+	if unsafeIPs || len(safeIPs) == 0 {
+		return nil, fmt.Errorf("blocked target host: %s", host)
+	}
+	return safeIPs, nil
+}
+
+func validateTargetSafety(ctx context.Context, resolver *net.Resolver, t *target) error {
+	_, err := resolveSafeTarget(ctx, resolver, t)
+	return err
+}
+
+func validateHostSafety(ctx context.Context, resolver *net.Resolver, host string) error {
+	_, err := resolveSafeHostIPs(ctx, resolver, host)
+	return err
 }
 
 func resolveTargetIPs(ctx context.Context, resolver *net.Resolver, host string) ([]net.IP, error) {

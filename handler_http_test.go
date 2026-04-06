@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newUnsafeTestProxyHandler() *ProxyHandler {
@@ -293,5 +295,88 @@ func TestServeHTTPBlocksDangerousTarget(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "blocked target host") {
 		t.Fatalf("body = %q, want blocked target host message", rr.Body.String())
+	}
+}
+
+func TestResolvedTargetFromContextRequiresAddresses(t *testing.T) {
+	_, err := resolvedTargetFromContext(context.WithValue(context.Background(), resolvedTargetContextKey{}, &resolvedTarget{}))
+	if err == nil || !strings.Contains(err.Error(), "missing resolved target addresses") {
+		t.Fatalf("resolvedTargetFromContext() error = %v, want missing resolved target addresses", err)
+	}
+}
+
+func TestDialContextUsesResolvedTargetAddress(t *testing.T) {
+	handler := NewProxyHandler(true)
+	handler.allowUnsafeDNS = false
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			accepted <- ""
+			return
+		}
+		accepted <- conn.RemoteAddr().String()
+		conn.Close()
+	}()
+
+	target := &target{Scheme: "http", Domain: "example.com", Port: ln.Addr().(*net.TCPAddr).Port}
+	rt := &resolvedTarget{dialAddrs: []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(target.Port))}}
+	ctx := context.WithValue(context.Background(), resolvedTargetContextKey{}, rt)
+
+	conn, err := handler.dialContext(ctx, "tcp", net.JoinHostPort(target.Domain, strconv.Itoa(target.Port)))
+	if err != nil {
+		t.Fatalf("dialContext() error = %v", err)
+	}
+	conn.Close()
+
+	if got := <-accepted; got == "" {
+		t.Fatal("expected listener to accept resolved target connection")
+	}
+}
+
+func TestDialContextFallsBackToNextResolvedTargetAddress(t *testing.T) {
+	handler := NewProxyHandler(true)
+	handler.allowUnsafeDNS = false
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			conn.Close()
+			accepted <- struct{}{}
+		}
+	}()
+
+	resolved := &resolvedTarget{
+		dialAddrs: []string{
+			net.JoinHostPort("127.0.0.2", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)),
+			net.JoinHostPort("127.0.0.1", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)),
+		},
+	}
+	ctx := context.WithValue(context.Background(), resolvedTargetContextKey{}, resolved)
+
+	conn, err := handler.dialContext(ctx, "tcp", net.JoinHostPort("example.com", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)))
+	if err != nil {
+		t.Fatalf("dialContext() fallback error = %v", err)
+	}
+	conn.Close()
+
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected listener to accept fallback resolved target connection")
 	}
 }

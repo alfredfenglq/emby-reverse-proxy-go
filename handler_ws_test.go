@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -435,6 +436,16 @@ func TestWebSocketProxyBlocksDangerousTarget(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestDialTargetConnRequiresResolvedTargetWhenDNSBlockingEnabled(t *testing.T) {
+	handler := NewProxyHandler(true)
+	handler.allowUnsafeDNS = false
+
+	_, err := handler.dialTargetConn(context.Background(), &target{Scheme: "http", Domain: "example.com", Port: 80}, nil)
+	if err == nil || !strings.Contains(err.Error(), "missing resolved target") {
+		t.Fatalf("dialTargetConn() error = %v, want missing resolved target", err)
 	}
 }
 
