@@ -221,11 +221,28 @@ func TestValidateTargetSafety(t *testing.T) {
 	}
 }
 
+func TestResolveSafeTarget(t *testing.T) {
+	ctx := context.Background()
+	target := &target{Scheme: "https", Domain: "8.8.8.8", Port: 443}
+
+	rt, err := resolveSafeTarget(ctx, net.DefaultResolver, target)
+	if err != nil {
+		t.Fatalf("resolveSafeTarget(%q) unexpected error: %v", target.Domain, err)
+	}
+	addrs := rt.dialAddresses()
+	if len(addrs) != 1 {
+		t.Fatalf("resolved address count = %d, want 1", len(addrs))
+	}
+	if addrs[0] != "8.8.8.8:443" {
+		t.Fatalf("dialAddresses()[0] = %q, want %q", addrs[0], "8.8.8.8:443")
+	}
+}
+
 func TestParseBlockPrivateTargets(t *testing.T) {
 	tests := []struct {
-		name  string
-		raw   string
-		want  bool
+		name string
+		raw  string
+		want bool
 	}{
 		{name: "default empty true", raw: "", want: true},
 		{name: "explicit true", raw: "true", want: true},

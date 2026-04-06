@@ -39,6 +39,11 @@ type ProxyHandler struct {
 	allowUnsafeDNS bool
 }
 
+const upstreamDialTimeout = 30 * time.Second
+const upstreamKeepAlive = 60 * time.Second
+
+type resolvedTargetContextKey struct{}
+
 func parseBlockPrivateTargets(raw string) bool {
 	if raw == "" {
 		return true
@@ -56,12 +61,12 @@ func parseBlockPrivateTargets(raw string) bool {
 func NewProxyHandler(blockPrivateTargets bool) *ProxyHandler {
 	h := &ProxyHandler{resolver: net.DefaultResolver, allowUnsafeDNS: !blockPrivateTargets}
 	transport := &http.Transport{
-		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: 20,
-		MaxConnsPerHost:     50,
-		IdleConnTimeout:     120 * time.Second,
-		TLSClientConfig:     &tls.Config{},
-		DialContext:         h.dialContext,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   20,
+		MaxConnsPerHost:       50,
+		IdleConnTimeout:       120 * time.Second,
+		TLSClientConfig:       &tls.Config{},
+		DialContext:           h.dialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 300 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -92,34 +97,73 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var rt *resolvedTarget
 	if !h.allowUnsafeDNS {
-		if err := validateTargetSafety(r.Context(), h.resolver, t); err != nil {
+		rt, err = resolveSafeTarget(r.Context(), h.resolver, t)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		r = r.WithContext(context.WithValue(r.Context(), resolvedTargetContextKey{}, rt))
 	}
 
 	start := time.Now()
 	if isWebSocketRequest(r) {
-		h.serveWebSocket(w, r, t, start)
+		h.serveWebSocket(w, r, t, rt, start)
 		return
 	}
 
 	h.serveHTTPProxy(w, r, t, start)
 }
 
+func resolvedTargetFromContext(ctx context.Context) (*resolvedTarget, error) {
+	rt, ok := ctx.Value(resolvedTargetContextKey{}).(*resolvedTarget)
+	if !ok || rt == nil {
+		return nil, fmt.Errorf("missing resolved target")
+	}
+	if len(rt.dialAddrs) == 0 {
+		return nil, fmt.Errorf("missing resolved target addresses")
+	}
+	return rt, nil
+}
+
+func dialResolvedAddresses(ctx context.Context, network string, dialer *net.Dialer, addrs []string, onConn func(net.Conn) (net.Conn, error)) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("missing resolved target addresses")
+	}
+	var lastErr error
+	for _, addr := range addrs {
+		conn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if onConn == nil {
+			return conn, nil
+		}
+		wrapped, err := onConn(conn)
+		if err == nil {
+			return wrapped, nil
+		}
+		conn.Close()
+		lastErr = err
+	}
+	if lastErr == nil {
+		return nil, fmt.Errorf("missing resolved target addresses")
+	}
+	return nil, lastErr
+}
+
 func (h *ProxyHandler) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(addr)
+	dialer := &net.Dialer{Timeout: upstreamDialTimeout, KeepAlive: upstreamKeepAlive}
+	if h.allowUnsafeDNS {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	rt, err := resolvedTargetFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !h.allowUnsafeDNS {
-		if err := validateHostSafety(ctx, h.resolver, host); err != nil {
-			return nil, err
-		}
-	}
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 60 * time.Second}
-	return dialer.DialContext(ctx, network, addr)
+	return dialResolvedAddresses(ctx, network, dialer, rt.dialAddresses(), nil)
 }
 
 func (h *ProxyHandler) serveHTTPProxy(w http.ResponseWriter, r *http.Request, t *target, start time.Time) {
@@ -279,4 +323,3 @@ func looksLikeMedia(path string) bool {
 	}
 	return false
 }
-

@@ -19,7 +19,7 @@ import (
 
 const webSocketHandshakeTimeout = 10 * time.Second
 
-func (h *ProxyHandler) serveWebSocket(w http.ResponseWriter, r *http.Request, t *target, start time.Time) {
+func (h *ProxyHandler) serveWebSocket(w http.ResponseWriter, r *http.Request, t *target, rt *resolvedTarget, start time.Time) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "websocket not supported", http.StatusInternalServerError)
@@ -35,7 +35,7 @@ func (h *ProxyHandler) serveWebSocket(w http.ResponseWriter, r *http.Request, t 
 	defer clientConn.Close()
 	_ = clientConn.SetDeadline(time.Now().Add(webSocketHandshakeTimeout))
 
-	upstreamConn, err := h.dialTargetConn(r.Context(), t)
+	upstreamConn, err := h.dialTargetConn(r.Context(), t, rt)
 	if err != nil {
 		log.Printf("[ERROR] websocket dial %s/%s failed: %v", t.Domain, t.Path, err)
 		writeHijackedHTTPError(clientRW, http.StatusBadGateway, "upstream websocket connection failed")
@@ -116,18 +116,27 @@ func isWebSocketRequest(r *http.Request) bool {
 	return headerContainsToken(r.Header, "Connection", "upgrade") && strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
 }
 
-func (h *ProxyHandler) dialTargetConn(ctx context.Context, t *target) (net.Conn, error) {
+func (h *ProxyHandler) dialTargetConn(ctx context.Context, t *target, rt *resolvedTarget) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: upstreamDialTimeout, KeepAlive: upstreamKeepAlive}
+	addrs := []string{net.JoinHostPort(t.Domain, strconv.Itoa(t.Port))}
 	if !h.allowUnsafeDNS {
-		if err := validateTargetSafety(ctx, h.resolver, t); err != nil {
+		if rt == nil {
+			return nil, fmt.Errorf("missing resolved target")
+		}
+		addrs = rt.dialAddresses()
+	}
+	return dialResolvedAddresses(ctx, "tcp", dialer, addrs, func(conn net.Conn) (net.Conn, error) {
+		if t.Scheme != "https" {
+			return conn, nil
+		}
+		_ = conn.SetDeadline(time.Now().Add(webSocketHandshakeTimeout))
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: t.Domain})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return nil, err
 		}
-	}
-	addr := net.JoinHostPort(t.Domain, strconv.Itoa(t.Port))
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 60 * time.Second}
-	if t.Scheme == "https" {
-		return tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: t.Domain})
-	}
-	return dialer.DialContext(ctx, "tcp", addr)
+		_ = tlsConn.SetDeadline(time.Time{})
+		return tlsConn, nil
+	})
 }
 
 func writeWebSocketRequest(conn net.Conn, r *http.Request, t *target) error {
