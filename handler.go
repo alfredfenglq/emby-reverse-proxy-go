@@ -184,7 +184,7 @@ func (h *ProxyHandler) serveHTTPProxy(w http.ResponseWriter, r *http.Request, t 
 		outReq.Header.Set("If-Range", ifr)
 	}
 	setUpstreamHost(outReq, t)
-	rewriteProxySensitiveRequestHeaders(outReq.Header)
+	rewriteProxySensitiveRequestHeaders(outReq.Header, r.Header.Get("X-Forwarded-Prefix"))
 	if !media {
 		outReq.Header.Set("Accept-Encoding", "identity")
 	}

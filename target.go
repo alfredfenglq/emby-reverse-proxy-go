@@ -108,7 +108,53 @@ func inferBaseURL(r *http.Request) string {
 	if host == "" || strings.ContainsAny(host, "/\\ 	\r\n") {
 		host = r.Host
 	}
-	return scheme + "://" + host
+	baseURL := scheme + "://" + host
+	if prefix := sanitizeForwardedPrefix(r.Header.Get("X-Forwarded-Prefix")); prefix != "" {
+		return baseURL + prefix
+	}
+	return baseURL
+}
+
+func sanitizeForwardedPrefix(raw string) string {
+	if idx := strings.IndexByte(raw, ','); idx >= 0 {
+		raw = raw[:idx]
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	raw = strings.TrimRight(raw, "/")
+	if raw == "" || raw == "/" {
+		return ""
+	}
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; {
+		case c == '\\', c == '?', c == '#', c <= 0x20, c == 0x7f:
+			return ""
+		}
+	}
+	return raw
+}
+
+func stripForwardedPrefix(path, forwardedPrefix string) string {
+	prefix := sanitizeForwardedPrefix(forwardedPrefix)
+	if prefix == "" {
+		return path
+	}
+	if path == prefix {
+		return "/"
+	}
+	if !strings.HasPrefix(path, prefix+"/") {
+		return path
+	}
+	trimmed := strings.TrimPrefix(path, prefix)
+	if trimmed == "" {
+		return "/"
+	}
+	return trimmed
 }
 
 func isDefaultPort(scheme string, port int) bool {
@@ -125,12 +171,12 @@ func firstHeaderValue(raw string) string {
 	return strings.TrimSpace(strings.ToLower(raw))
 }
 
-func unproxyURL(raw string) string {
+func unproxyURL(raw, forwardedPrefix string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return raw
 	}
-	t, err := parseTarget(parsed.Path, parsed.RawQuery)
+	t, err := parseTarget(stripForwardedPrefix(parsed.Path, forwardedPrefix), parsed.RawQuery)
 	if err != nil {
 		return raw
 	}

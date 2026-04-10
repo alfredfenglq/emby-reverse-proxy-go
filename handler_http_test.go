@@ -125,8 +125,9 @@ func TestServeHTTPRewriteBodyPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/http/127.0.0.1/"+strconv.Itoa(port)+"/Items", nil)
 	req.Host = "proxy.example.com"
 	req.Header.Set("X-Forwarded-Proto", "https")
-	req.Header.Set("Referer", "https://proxy.example.com/https/upstream.example.com/443/app")
-	req.Header.Set("Origin", "https://proxy.example.com/https/upstream.example.com/443/app")
+	req.Header.Set("X-Forwarded-Prefix", "/custom-prefix")
+	req.Header.Set("Referer", "https://proxy.example.com/custom-prefix/https/upstream.example.com/443/app")
+	req.Header.Set("Origin", "https://proxy.example.com/custom-prefix/https/upstream.example.com/443/app")
 	req.Header.Set("X-Forwarded-For", "1.2.3.4")
 	rr := httptest.NewRecorder()
 
@@ -135,7 +136,7 @@ func TestServeHTTPRewriteBodyPath(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
-	want := `{"url":"https://proxy.example.com/http/127.0.0.1/` + strconv.Itoa(port) + `/Items/1"}`
+	want := `{"url":"https://proxy.example.com/custom-prefix/http/127.0.0.1/` + strconv.Itoa(port) + `/Items/1"}`
 	if got := strings.TrimSpace(rr.Body.String()); got != want {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
@@ -162,6 +163,33 @@ func TestServeHTTPRewriteRedirectHeaders(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusFound)
 	}
 	want := "https://proxy.example.com/http/127.0.0.1/" + strconv.Itoa(port) + "/web/index.html"
+	if got := rr.Header().Get("Location"); got != want {
+		t.Fatalf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestServeHTTPRewriteRedirectHeadersWithForwardedPrefix(t *testing.T) {
+	var port int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://127.0.0.1:"+strconv.Itoa(port)+"/web/index.html")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	port = upstream.Listener.Addr().(*net.TCPAddr).Port
+	handler := newUnsafeTestProxyHandler()
+	req := httptest.NewRequest(http.MethodGet, "/http/127.0.0.1/"+strconv.Itoa(port)+"/redirect", nil)
+	req.Host = "proxy.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Prefix", "/custom-prefix")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusFound)
+	}
+	want := "https://proxy.example.com/custom-prefix/http/127.0.0.1/" + strconv.Itoa(port) + "/web/index.html"
 	if got := rr.Header().Get("Location"); got != want {
 		t.Fatalf("Location = %q, want %q", got, want)
 	}

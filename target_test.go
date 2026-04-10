@@ -43,13 +43,24 @@ func TestInferBaseURL(t *testing.T) {
 			want: "https://local.proxy:8080",
 		},
 		{
-			name: "take first forwarded value",
+			name: "forwarded prefix appended",
 			host: "local.proxy:8080",
 			headers: map[string]string{
-				"X-Forwarded-Proto": "HTTPS, http",
-				"X-Forwarded-Host":  "Proxy.Example.com, ignored.example.com",
+				"X-Forwarded-Proto":  "https",
+				"X-Forwarded-Host":   "proxy.example.com",
+				"X-Forwarded-Prefix": "/custom-prefix",
 			},
-			want: "https://proxy.example.com",
+			want: "https://proxy.example.com/custom-prefix",
+		},
+		{
+			name: "forwarded prefix normalized",
+			host: "local.proxy:8080",
+			headers: map[string]string{
+				"X-Forwarded-Proto":  "https",
+				"X-Forwarded-Host":   "proxy.example.com",
+				"X-Forwarded-Prefix": "custom-prefix/",
+			},
+			want: "https://proxy.example.com/custom-prefix",
 		},
 	}
 
@@ -70,8 +81,43 @@ func TestUnproxyURLPreservesQuery(t *testing.T) {
 	raw := "https://proxy.example.com/https/emby.example.com/443/web/index.html?api_key=abc123&userId=42"
 	want := "https://emby.example.com/web/index.html?api_key=abc123&userId=42"
 
-	if got := unproxyURL(raw); got != want {
+	if got := unproxyURL(raw, ""); got != want {
 		t.Fatalf("unproxyURL() = %q, want %q", got, want)
+	}
+}
+
+func TestUnproxyURLStripsForwardedPrefix(t *testing.T) {
+	raw := "https://proxy.example.com/custom-prefix/https/emby.example.com/443/web/index.html?api_key=abc123&userId=42"
+	want := "https://emby.example.com/web/index.html?api_key=abc123&userId=42"
+
+	if got := unproxyURL(raw, "/custom-prefix"); got != want {
+		t.Fatalf("unproxyURL() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeForwardedPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: ""},
+		{name: "root", raw: "/", want: ""},
+		{name: "adds leading slash", raw: "custom", want: "/custom"},
+		{name: "trims trailing slash", raw: "/custom/", want: "/custom"},
+		{name: "takes first forwarded value", raw: "/custom, /ignored", want: "/custom"},
+		{name: "rejects query", raw: "/custom?a=1", want: ""},
+		{name: "rejects fragment", raw: "/custom#x", want: ""},
+		{name: "rejects backslash", raw: "/custom\\test", want: ""},
+		{name: "rejects newline", raw: "/custom\nnext", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeForwardedPrefix(tt.raw); got != tt.want {
+				t.Fatalf("sanitizeForwardedPrefix(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
 	}
 }
 
