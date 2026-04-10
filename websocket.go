@@ -153,7 +153,7 @@ func writeWebSocketRequest(conn net.Conn, r *http.Request, t *target) error {
 	}
 	copyRequestHeaders(req.Header, r.Header, true)
 	setUpstreamHost(req, t)
-	rewriteProxySensitiveRequestHeaders(req.Header)
+	rewriteProxySensitiveRequestHeaders(req.Header, r.Header.Get("X-Forwarded-Prefix"))
 	return req.Write(conn)
 }
 

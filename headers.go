@@ -23,6 +23,7 @@ var stripRequestHeaders = []string{
 	"X-Forwarded-Proto",
 	"X-Forwarded-Host",
 	"X-Forwarded-Port",
+	"X-Forwarded-Prefix",
 	"Forwarded",
 	"Via",
 }
@@ -59,15 +60,15 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-func rewriteProxySensitiveRequestHeaders(h http.Header) {
+func rewriteProxySensitiveRequestHeaders(h http.Header, forwardedPrefix string) {
 	for _, name := range stripRequestHeaders {
 		h.Del(name)
 	}
 	if ref := h.Get("Referer"); ref != "" {
-		h.Set("Referer", unproxyURL(ref))
+		h.Set("Referer", unproxyURL(ref, forwardedPrefix))
 	}
 	if origin := h.Get("Origin"); origin != "" {
-		h.Set("Origin", unproxyURL(origin))
+		h.Set("Origin", unproxyURL(origin, forwardedPrefix))
 	}
 }
 

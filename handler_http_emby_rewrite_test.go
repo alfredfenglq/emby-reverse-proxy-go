@@ -50,6 +50,35 @@ func TestServeHTTPRewriteBodyEmbyMediaSourcesRegression(t *testing.T) {
 	assertBodyContains(t, body, `https://proxy.example.com/http/transcode-node.example.com/8096/Videos/123/master.m3u8?DeviceId=device-1&MediaSourceId=ms1`)
 }
 
+func TestServeHTTPRewriteBodyEmbyMediaSourcesWithForwardedPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{
+			"Items": [{
+				"Id": "123",
+				"MediaSources": [{
+					"Id": "ms1",
+					"Path": "https://stream-cdn.example.com/videos/123/master.m3u8?MediaSourceId=ms1&api_key=test-key",
+					"TranscodingUrl": "http://transcode-node.example.com:8096/Videos/123/master.m3u8?DeviceId=device-1&MediaSourceId=ms1"
+				}]
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	handler := newUnsafeTestProxyHandler()
+	req := newProxyRequest(http.MethodGet, "/http/127.0.0.1/"+strconv.Itoa(port)+"/Items")
+	req.Header.Set("X-Forwarded-Prefix", "/custom-prefix")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	assertResponseStatus(t, rr, http.StatusOK)
+	body := rr.Body.String()
+	assertBodyContains(t, body, `https://proxy.example.com/custom-prefix/https/stream-cdn.example.com/443/videos/123/master.m3u8?MediaSourceId=ms1&api_key=test-key`)
+	assertBodyContains(t, body, `https://proxy.example.com/custom-prefix/http/transcode-node.example.com/8096/Videos/123/master.m3u8?DeviceId=device-1&MediaSourceId=ms1`)
+}
+
 func TestServeHTTPRewriteBodySkipsNoContentProgressResponsePost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

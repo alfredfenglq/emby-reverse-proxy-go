@@ -94,6 +94,22 @@ func TestRewriteBody(t *testing.T) {
 	}
 }
 
+func TestRewriteSingleURLWithPrefixedBaseURL(t *testing.T) {
+	got := rewriteSingleURL("https://emby.example.com/web/index.html?x=1", "https://proxy.example.com/custom-prefix")
+	want := "https://proxy.example.com/custom-prefix/https/emby.example.com/443/web/index.html?x=1"
+	if got != want {
+		t.Fatalf("rewriteSingleURL() = %q, want %q", got, want)
+	}
+}
+
+func TestRewriteBodyWithPrefixedBaseURL(t *testing.T) {
+	body := []byte(`{"main":"https://emby.example.com/Items/1","stream":"https://stream.example.com/Videos/1/stream.mp4"}`)
+	want := `{"main":"https://proxy.example.com/custom-prefix/https/emby.example.com/443/Items/1","stream":"https://proxy.example.com/custom-prefix/https/stream.example.com/443/Videos/1/stream.mp4"}`
+	if got := string(rewriteBody(body, "https://proxy.example.com/custom-prefix")); got != want {
+		t.Fatalf("rewriteBody() = %q, want %q", got, want)
+	}
+}
+
 func TestRewriteSingleURLDefaultPortMatch(t *testing.T) {
 	got := rewriteSingleURL("http://emby.example.com/system/info", "https://proxy.example.com")
 	want := "https://proxy.example.com/http/emby.example.com/80/system/info"
